@@ -41,7 +41,7 @@ def build_main_tweet(is_new: bool) -> str:
     tags = BASE_HASHTAGS + (HASHTAGS_EXTRA or [])
     if is_new:
         tags = ["#新着"] + tags
-    # 本文の最後（画像の下）にハッシュタグ
+    # 本文の一番下（画像/動画の下）にハッシュタグ
     return FIXED_TEXT + "\n\n" + " ".join(tags)
 
 def build_reply(title: str, fanza_url: str, amazon_url: str | None) -> str:
@@ -90,6 +90,15 @@ def main():
     for kind, url, suffix in try_urls:
         try:
             media_path = download(url, suffix)
+
+            # === 画像は秘部モザイク（自動） ===
+            if kind == "image":
+                from censor import censor_image
+                censored_path = media_path.replace(suffix, "_censored.jpg")
+                if censor_image(media_path, censored_path):
+                    media_path = censored_path
+            # ================================
+
             media_id = tw.upload_media_chunked(media_path)
             log(f"media upload ok: {kind} {url}")
             break
@@ -98,16 +107,19 @@ def main():
 
     main_text = build_main_tweet(is_new)
 
-    # ===== v2投稿 =====
+    # v2 で投稿
     res = tw.post_tweet_v2(main_text, media_ids=[media_id] if media_id else None)
     tweet_id = (res.get("data") or {}).get("id")
+    if not tweet_id:
+        log("tweet failed: no tweet_id")
+        return
 
+    # Amazonリンク（PA-APIなし運用：AMAZON_R18_URLS からランダム）
     from amazon_client import pick_amazon_r18_url
     amazon = pick_amazon_r18_url()
 
     reply_text = build_reply(title, link, amazon)
     tw.post_tweet_v2(reply_text, reply_to_tweet_id=tweet_id)
-    # ==================
 
     add_posted_id(f["content_id"])
     log("posted:", f["content_id"], title)
