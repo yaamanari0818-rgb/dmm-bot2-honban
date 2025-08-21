@@ -1,10 +1,11 @@
-# twitter_client.py（完全置き換え）
-import os, time, mimetypes
+# twitter_client.py（v1.1: upload / v2: create tweet）
+import os, time, mimetypes, json
 import requests
 from requests_oauthlib import OAuth1
 
-API_BASE = "https://api.twitter.com/1.1"
-UPLOAD_BASE = "https://upload.twitter.com/1.1"  # ← 重要：メディアはこっち
+API_V1 = "https://api.twitter.com/1.1"
+API_V2 = "https://api.twitter.com/2"
+UPLOAD_BASE = "https://upload.twitter.com/1.1"  # メディアはこっち
 
 def _must_env(name: str) -> str:
     v = os.getenv(name, "").strip()
@@ -21,12 +22,14 @@ class TwitterClient:
             _must_env("X_ACCESS_SECRET"),
         )
         self.sensitive = os.getenv("SENSITIVE_MEDIA", "true").lower() == "true"
+        # CloudflareやWAF対策：チャンク間に待機、サイズ調整できるように
+        self.chunk_mb = max(1, int(os.getenv("UPLOAD_CHUNK_MB", "4")))  # 1〜4MB推奨
+        self.append_pause = float(os.getenv("UPLOAD_APPEND_PAUSE_SEC", "0.4"))  # 連投間隔
 
-    # ---- media/upload (chunked) ----
+    # ---- media/upload (chunked, v1.1) ----
     def upload_media_chunked(self, filepath: str, media_type: str | None = None) -> str:
         size = os.path.getsize(filepath)
         media_type = media_type or (mimetypes.guess_type(filepath)[0] or "application/octet-stream")
-        # 画像/動画でメディアカテゴリを付ける（推奨）
         if media_type.startswith("video/"):
             media_category = "tweet_video"
         elif media_type.startswith("image/"):
@@ -42,18 +45,14 @@ class TwitterClient:
         if media_category:
             init_data["media_category"] = media_category
 
-        r = requests.post(
-            f"{UPLOAD_BASE}/media/upload.json",
-            auth=self.auth,
-            data=init_data,
-        )
+        r = requests.post(f"{UPLOAD_BASE}/media/upload.json", auth=self.auth, data=init_data)
         if r.status_code >= 400:
             raise RuntimeError(f"[INIT] media/upload 失敗 {r.status_code}: {r.text}")
         media_id = r.json()["media_id_string"]
 
         # APPEND
         seg = 0
-        chunk_size = 4 * 1024 * 1024
+        chunk_size = self.chunk_mb * 1024 * 1024
         with open(filepath, "rb") as f:
             while True:
                 chunk = f.read(chunk_size)
@@ -69,24 +68,17 @@ class TwitterClient:
                 if r.status_code >= 400:
                     raise RuntimeError(f"[APPEND] media/upload 失敗 {r.status_code}: {r.text}")
                 seg += 1
+                # 連投しすぎ回避
+                time.sleep(self.append_pause)
 
         # FINALIZE
-        r = requests.post(
-            f"{UPLOAD_BASE}/media/upload.json",
-            auth=self.auth,
-            data={"command": "FINALIZE", "media_id": media_id},
-        )
+        r = requests.post(f"{UPLOAD_BASE}/media/upload.json", auth=self.auth, data={"command": "FINALIZE", "media_id": media_id})
         if r.status_code >= 400:
             raise RuntimeError(f"[FINALIZE] media/upload 失敗 {r.status_code}: {r.text}")
-        info = r.json()
-        proc = info.get("processing_info", {})
+        proc = r.json().get("processing_info", {})
         while proc.get("state") in {"pending", "in_progress"}:
             time.sleep(proc.get("check_after_secs", 3))
-            q = requests.get(
-                f"{UPLOAD_BASE}/media/upload.json",
-                auth=self.auth,
-                params={"command": "STATUS", "media_id": media_id},
-            )
+            q = requests.get(f"{UPLOAD_BASE}/media/upload.json", auth=self.auth, params={"command": "STATUS", "media_id": media_id})
             if q.status_code >= 400:
                 raise RuntimeError(f"[STATUS] media/upload 失敗 {q.status_code}: {q.text}")
             proc = q.json().get("processing_info", {})
@@ -94,20 +86,18 @@ class TwitterClient:
                 raise RuntimeError(f"media processing failed: {proc}")
         return media_id
 
-    def post_tweet(self, text: str, media_ids: list[str] | None = None, reply_to_status_id: str | None = None) -> dict:
-        payload = {
-            "status": text,
-            "trim_user": True,
-            "possibly_sensitive": self.sensitive,
-        }
+    # ---- create Tweet (v2) ----
+    def post_tweet_v2(self, text: str, media_ids: list[str] | None = None, reply_to_tweet_id: str | None = None) -> dict:
+        payload = {"text": text}
         if media_ids:
-            payload["media_ids"] = ",".join(media_ids)
-        if reply_to_status_id:
-            payload["in_reply_to_status_id"] = reply_to_status_id
-            payload["auto_populate_reply_metadata"] = True
+            payload["media"] = {"media_ids": media_ids}
+        # v2: possibly_sensitive はトップレベルで可
+        payload["possibly_sensitive"] = self.sensitive
+        if reply_to_tweet_id:
+            payload["reply"] = {"in_reply_to_tweet_id": reply_to_tweet_id}
 
-        r = requests.post(f"{API_BASE}/statuses/update.json", auth=self.auth, data=payload)
+        headers = {"Content-Type": "application/json"}
+        r = requests.post(f"{API_V2}/tweets", auth=self.auth, headers=headers, data=json.dumps(payload))
         if r.status_code >= 400:
-            # エラー理由を見やすく
-            raise RuntimeError(f"[POST] statuses/update 失敗 {r.status_code}: {r.text}")
+            raise RuntimeError(f"[V2 POST] /2/tweets 失敗 {r.status_code}: {r.text}")
         return r.json()
