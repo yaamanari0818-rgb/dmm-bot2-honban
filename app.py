@@ -41,12 +41,12 @@ def build_main_tweet(is_new: bool) -> str:
     tags = BASE_HASHTAGS + (HASHTAGS_EXTRA or [])
     if is_new:
         tags = ["#新着"] + tags
-    # 本文の最後にハッシュタグ
-    return FIXED_TEXT + "\n" + " ".join(tags)
+    # 本文の最後（画像の下）にハッシュタグ
+    return FIXED_TEXT + "\n\n" + " ".join(tags)
 
 def build_reply(title: str, fanza_url: str, amazon_url: str | None) -> str:
     parts = [
-        title,
+        f"👀{title}👇",
         fanza_url,
         "🔥おすすめのR18グッズはこちら🔥"
     ]
