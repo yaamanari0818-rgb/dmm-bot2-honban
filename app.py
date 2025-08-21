@@ -1,4 +1,4 @@
-# app.py（完全置き換え版）
+# app.py（v2投稿対応版）
 from __future__ import annotations
 import os, tempfile, requests
 from util import is_allowed_hour, load_posted_ids, add_posted_id, log
@@ -94,22 +94,28 @@ def main():
     for kind, url, suffix in try_urls:
         try:
             media_path = download(url, suffix)
-            media_id = tw.upload_media_chunked(media_path)
+            media_id = tw.upload_media_chunked(media_path)  # v1.1 upload (OK)
             log(f"media upload ok: {kind} {url}")
             break
         except Exception as e:
             log(f"media download/upload failed ({kind}): {e}")
 
     main_text = build_main_tweet(is_new)
-    res = tw.post_tweet(main_text, media_ids=[media_id] if media_id else None)
-    tweet_id = res.get("id_str")
+
+    # ===== ここを v2 に変更 =====
+    res = tw.post_tweet_v2(main_text, media_ids=[media_id] if media_id else None)
+    tweet_id = (res.get("data") or {}).get("id")
+    # ===========================
 
     # Amazonリンク（PA-APIなし運用：AMAZON_R18_URLS からランダム）
     from amazon_client import pick_amazon_r18_url
     amazon = pick_amazon_r18_url()
 
     reply_text = build_reply(title, link, amazon)
-    tw.post_tweet(reply_text, reply_to_status_id=tweet_id)
+
+    # ===== リプも v2 に変更 =====
+    tw.post_tweet_v2(reply_text, reply_to_tweet_id=tweet_id)
+    # ===========================
 
     add_posted_id(f["content_id"])
     log("posted:", f["content_id"], title)
