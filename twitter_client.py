@@ -1,4 +1,4 @@
-# twitter_client.py（v1.1: upload / v2: create tweet）
+# twitter_client.py（v1.1: upload / v2: create tweet, possibly_sensitiveを送らない）
 import os, time, mimetypes, json
 import requests
 from requests_oauthlib import OAuth1
@@ -21,10 +21,9 @@ class TwitterClient:
             _must_env("X_ACCESS_TOKEN"),
             _must_env("X_ACCESS_SECRET"),
         )
-        self.sensitive = os.getenv("SENSITIVE_MEDIA", "true").lower() == "true"
-        # CloudflareやWAF対策：チャンク間に待機、サイズ調整できるように
-        self.chunk_mb = max(1, int(os.getenv("UPLOAD_CHUNK_MB", "4")))  # 1〜4MB推奨
-        self.append_pause = float(os.getenv("UPLOAD_APPEND_PAUSE_SEC", "0.4"))  # 連投間隔
+        # Cloudflare/WAF対策のため調整可能に
+        self.chunk_mb = max(1, int(os.getenv("UPLOAD_CHUNK_MB", "2")))  # まずは2MB
+        self.append_pause = float(os.getenv("UPLOAD_APPEND_PAUSE_SEC", "0.8"))  # 0.8秒
 
     # ---- media/upload (chunked, v1.1) ----
     def upload_media_chunked(self, filepath: str, media_type: str | None = None) -> str:
@@ -50,7 +49,7 @@ class TwitterClient:
             raise RuntimeError(f"[INIT] media/upload 失敗 {r.status_code}: {r.text}")
         media_id = r.json()["media_id_string"]
 
-        # APPEND
+        # APPEND（小さめチャンク + 待機）
         seg = 0
         chunk_size = self.chunk_mb * 1024 * 1024
         with open(filepath, "rb") as f:
@@ -68,7 +67,6 @@ class TwitterClient:
                 if r.status_code >= 400:
                     raise RuntimeError(f"[APPEND] media/upload 失敗 {r.status_code}: {r.text}")
                 seg += 1
-                # 連投しすぎ回避
                 time.sleep(self.append_pause)
 
         # FINALIZE
@@ -91,8 +89,6 @@ class TwitterClient:
         payload = {"text": text}
         if media_ids:
             payload["media"] = {"media_ids": media_ids}
-        # v2: possibly_sensitive はトップレベルで可
-        payload["possibly_sensitive"] = self.sensitive
         if reply_to_tweet_id:
             payload["reply"] = {"in_reply_to_tweet_id": reply_to_tweet_id}
 
