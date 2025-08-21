@@ -1,4 +1,3 @@
-# app.py（v2投稿対応版）
 from __future__ import annotations
 import os, tempfile, requests
 from util import is_allowed_hour, load_posted_ids, add_posted_id, log
@@ -18,12 +17,6 @@ def download(url: str, suffix: str) -> str:
     return path
 
 def choose_sample_url(sample) -> str | None:
-    """
-    FANZAの sampleMovieURL は文字列/辞書/配列のいずれか。
-    - 文字列: そのまま返す
-    - 辞書: size_720_480 > size_644_414 > size_560_360 > size_476_306 の順で選ぶ
-    - 配列: 先頭から順に再帰的に判定して最初に見つかったものを返す
-    """
     if not sample:
         return None
     if isinstance(sample, str):
@@ -33,7 +26,6 @@ def choose_sample_url(sample) -> str | None:
             url = sample.get(key)
             if isinstance(url, str) and url:
                 return url
-        # 念のため他の値が文字列なら拾う
         for v in sample.values():
             if isinstance(v, str) and v:
                 return v
@@ -49,10 +41,15 @@ def build_main_tweet(is_new: bool) -> str:
     tags = BASE_HASHTAGS + (HASHTAGS_EXTRA or [])
     if is_new:
         tags = ["#新着"] + tags
-    return " ".join(tags + ["\n" + FIXED_TEXT])
+    # 本文の最後にハッシュタグ
+    return FIXED_TEXT + "\n" + " ".join(tags)
 
 def build_reply(title: str, fanza_url: str, amazon_url: str | None) -> str:
-    parts = [title, fanza_url]
+    parts = [
+        title,
+        fanza_url,
+        "🔥おすすめのR18グッズはこちら🔥"
+    ]
     if amazon_url:
         parts.append(amazon_url)
     return "\n".join(parts)
@@ -76,13 +73,9 @@ def main():
     media_path = None
     media_id = None
 
-    # まずはサンプル動画を優先
-    sample_url = choose_sample_url(sample_raw)
+    # 画像優先 → 動画
     try_urls = []
-    if sample_url:
-        try_urls.append(("video", sample_url, ".mp4"))
     if poster:
-        # posterはURL文字列の想定だが、もし辞書なら適当に大きめを選ぶ
         if isinstance(poster, dict):
             poster_url = poster.get("large") or poster.get("list") or poster.get("small")
         else:
@@ -90,11 +83,14 @@ def main():
         if poster_url:
             try_urls.append(("image", poster_url, ".jpg"))
 
-    # ダウンロード試行（動画→ダメなら画像）
+    sample_url = choose_sample_url(sample_raw)
+    if sample_url:
+        try_urls.append(("video", sample_url, ".mp4"))
+
     for kind, url, suffix in try_urls:
         try:
             media_path = download(url, suffix)
-            media_id = tw.upload_media_chunked(media_path)  # v1.1 upload (OK)
+            media_id = tw.upload_media_chunked(media_path)
             log(f"media upload ok: {kind} {url}")
             break
         except Exception as e:
@@ -102,20 +98,16 @@ def main():
 
     main_text = build_main_tweet(is_new)
 
-    # ===== ここを v2 に変更 =====
+    # ===== v2投稿 =====
     res = tw.post_tweet_v2(main_text, media_ids=[media_id] if media_id else None)
     tweet_id = (res.get("data") or {}).get("id")
-    # ===========================
 
-    # Amazonリンク（PA-APIなし運用：AMAZON_R18_URLS からランダム）
     from amazon_client import pick_amazon_r18_url
     amazon = pick_amazon_r18_url()
 
     reply_text = build_reply(title, link, amazon)
-
-    # ===== リプも v2 に変更 =====
     tw.post_tweet_v2(reply_text, reply_to_tweet_id=tweet_id)
-    # ===========================
+    # ==================
 
     add_posted_id(f["content_id"])
     log("posted:", f["content_id"], title)
