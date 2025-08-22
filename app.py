@@ -1,3 +1,4 @@
+# app.py（1枚目画像を優先・モザイク・v2投稿・ハッシュタグは本文の一番下）
 from __future__ import annotations
 import os, tempfile, requests
 from util import is_allowed_hour, load_posted_ids, add_posted_id, log
@@ -41,14 +42,16 @@ def build_main_tweet(is_new: bool) -> str:
     tags = BASE_HASHTAGS + (HASHTAGS_EXTRA or [])
     if is_new:
         tags = ["#新着"] + tags
-    # 本文の一番下（画像/動画の下）にハッシュタグ
+    # 本文の一番下（メディアの下）にハッシュタグ
     return FIXED_TEXT + "\n\n" + " ".join(tags)
 
 def build_reply(title: str, fanza_url: str, amazon_url: str | None) -> str:
     parts = [
         f"👀{title}👇",
         fanza_url,
-        "🔥おすすめのR18グッズはこちら🔥"
+
+        
+        "🔥おすすめのR18グッズはこちら🔥",
     ]
     if amazon_url:
         parts.append(amazon_url)
@@ -66,40 +69,51 @@ def main():
         return
 
     f = extract_fields(item)
-    title, link, sample_raw, poster = f["title"], f["link"], f["sample_movie"], f["poster"]
+    title, link, sample_raw, poster, sample_images = (
+        f["title"], f["link"], f["sample_movie"], f["poster"], f.get("sample_images") or []
+    )
 
     tw = TwitterClient()
 
     media_path = None
     media_id = None
 
-    # 画像優先 → 動画
+    # --- メディア選択方針 ---
+    # 1) 動画があれば挑戦（WAFで弾かれやすいので後に回したい場合は順序を入替可）
+    # 2) 画像は「サンプル画像配列の**1枚目**」を最優先
+    # 3) 無ければポスター系にフォールバック
     try_urls = []
-    if poster:
-        if isinstance(poster, dict):
-            poster_url = poster.get("large") or poster.get("list") or poster.get("small")
-        else:
-            poster_url = poster
-        if poster_url:
-            try_urls.append(("image", poster_url, ".jpg"))
 
+    # 画像（1枚目）
+    first_image_url = None
+    if sample_images:
+        first_image_url = sample_images[0]
+    elif poster:
+        if isinstance(poster, dict):
+            first_image_url = poster.get("large") or poster.get("list") or poster.get("small")
+        else:
+            first_image_url = poster
+
+    if first_image_url:
+        try_urls.append(("image", first_image_url, ".jpg"))
+
+    # 動画（任意：必要なら画像の後ろに）
     sample_url = choose_sample_url(sample_raw)
     if sample_url:
         try_urls.append(("video", sample_url, ".mp4"))
 
+    # ダウンロード＆（画像なら）モザイク → アップロード
     for kind, url, suffix in try_urls:
         try:
             media_path = download(url, suffix)
 
-            # === 画像は秘部モザイク（自動） ===
             if kind == "image":
                 from censor import censor_image
                 censored_path = media_path.replace(suffix, "_censored.jpg")
                 if censor_image(media_path, censored_path):
-                    media_path = censored_path
-            # ================================
+                    media_path = censored_path  # 秘部モザイク適用時のみ差し替え
 
-            media_id = tw.upload_media_chunked(media_path)
+            media_id = tw.upload_media_chunked(media_path)  # v1.1 upload
             log(f"media upload ok: {kind} {url}")
             break
         except Exception as e:
