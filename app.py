@@ -1,14 +1,19 @@
-# app.py（1枚目画像を優先・モザイク・v2投稿・ハッシュタグは本文の一番下）
+# app.py（ジャケットのみタイプ）
 from __future__ import annotations
 import os, tempfile, requests
 from util import is_allowed_hour, load_posted_ids, add_posted_id, log
 from twitter_client import TwitterClient
 from fanza_client import pick_item, extract_fields
 
+# ===== 文面設定 =====
 FIXED_TEXT = "作品詳細はコメ欄から↓"
 BASE_HASHTAGS = ["#素人", "#AV"]
 HASHTAGS_EXTRA = [t.strip() for t in os.getenv("HASHTAGS_EXTRA", "").split(',') if t.strip()]
 
+# モザイクを使う/使わない（任意）：変数で切替可（既定 true）
+MOSAIC_ENABLED = os.getenv("MOSAIC_ENABLED", "true").lower() == "true"
+
+# ===== ユーティリティ =====
 def download(url: str, suffix: str) -> str:
     r = requests.get(url, timeout=60)
     r.raise_for_status()
@@ -16,27 +21,6 @@ def download(url: str, suffix: str) -> str:
     with os.fdopen(fd, 'wb') as f:
         f.write(r.content)
     return path
-
-def choose_sample_url(sample) -> str | None:
-    if not sample:
-        return None
-    if isinstance(sample, str):
-        return sample
-    if isinstance(sample, dict):
-        for key in ("size_720_480", "size_644_414", "size_560_360", "size_476_306"):
-            url = sample.get(key)
-            if isinstance(url, str) and url:
-                return url
-        for v in sample.values():
-            if isinstance(v, str) and v:
-                return v
-        return None
-    if isinstance(sample, (list, tuple)):
-        for s in sample:
-            u = choose_sample_url(s)
-            if u:
-                return u
-    return None
 
 def build_main_tweet(is_new: bool) -> str:
     tags = BASE_HASHTAGS + (HASHTAGS_EXTRA or [])
@@ -49,14 +33,13 @@ def build_reply(title: str, fanza_url: str, amazon_url: str | None) -> str:
     parts = [
         f"👀{title}👇",
         fanza_url,
-
-        
         "🔥おすすめのR18グッズはこちら🔥",
     ]
     if amazon_url:
         parts.append(amazon_url)
     return "\n".join(parts)
 
+# ===== メイン =====
 def main():
     if not is_allowed_hour():
         log("skip: not allowed hour (JST)")
@@ -69,56 +52,42 @@ def main():
         return
 
     f = extract_fields(item)
-    title, link, sample_raw, poster, sample_images = (
-        f["title"], f["link"], f["sample_movie"], f["poster"], f.get("sample_images") or []
-    )
+    title, link, poster = f["title"], f["link"], f["poster"]
+
+    # --- ジャケットURLだけを使う ---
+    poster_url = None
+    if isinstance(poster, dict):
+        poster_url = poster.get("large") or poster.get("list") or poster.get("small")
+    elif isinstance(poster, str):
+        poster_url = poster
+
+    if not poster_url:
+        log("no poster image found; skip this item")
+        return
 
     tw = TwitterClient()
 
-    media_path = None
+    # ダウンロード →（任意）モザイク → アップロード
     media_id = None
+    try:
+        media_path = download(poster_url, ".jpg")
 
-    # --- メディア選択方針 ---
-    # 1) 動画があれば挑戦（WAFで弾かれやすいので後に回したい場合は順序を入替可）
-    # 2) 画像は「サンプル画像配列の**1枚目**」を最優先
-    # 3) 無ければポスター系にフォールバック
-    try_urls = []
-
-    # 画像（1枚目）
-    first_image_url = None
-    if sample_images:
-        first_image_url = sample_images[0]
-    elif poster:
-        if isinstance(poster, dict):
-            first_image_url = poster.get("large") or poster.get("list") or poster.get("small")
-        else:
-            first_image_url = poster
-
-    if first_image_url:
-        try_urls.append(("image", first_image_url, ".jpg"))
-
-    # 動画（任意：必要なら画像の後ろに）
-    sample_url = choose_sample_url(sample_raw)
-    if sample_url:
-        try_urls.append(("video", sample_url, ".mp4"))
-
-    # ダウンロード＆（画像なら）モザイク → アップロード
-    for kind, url, suffix in try_urls:
-        try:
-            media_path = download(url, suffix)
-
-            if kind == "image":
+        # 画像モザイク（有効時のみ）
+        if MOSAIC_ENABLED:
+            try:
                 from censor import censor_image
-                censored_path = media_path.replace(suffix, "_censored.jpg")
+                censored_path = media_path.replace(".jpg", "_censored.jpg")
                 if censor_image(media_path, censored_path):
-                    media_path = censored_path  # 秘部モザイク適用時のみ差し替え
+                    media_path = censored_path
+            except Exception as e:
+                log(f"censor skipped: {e}")
 
-            media_id = tw.upload_media_chunked(media_path)  # v1.1 upload
-            log(f"media upload ok: {kind} {url}")
-            break
-        except Exception as e:
-            log(f"media download/upload failed ({kind}): {e}")
+        media_id = tw.upload_media_chunked(media_path)  # v1.1 upload
+        log(f"media upload ok: image {poster_url}")
+    except Exception as e:
+        log(f"media download/upload failed (image): {e}")
 
+    # 本文（ハッシュタグは一番下）
     main_text = build_main_tweet(is_new)
 
     # v2 で投稿
@@ -128,10 +97,9 @@ def main():
         log("tweet failed: no tweet_id")
         return
 
-    # Amazonリンク（PA-APIなし運用：AMAZON_R18_URLS からランダム）
-    from amazon_client import pick_amazon_r18_url
+    # リプ（タイトル + FANZA + グッズ）
+    from amazon_client import pick_amazon_r18_url  # PA-API未使用のランダムURL運用
     amazon = pick_amazon_r18_url()
-
     reply_text = build_reply(title, link, amazon)
     tw.post_tweet_v2(reply_text, reply_to_tweet_id=tweet_id)
 
