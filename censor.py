@@ -1,29 +1,28 @@
-# censor.py（NudeNet 3.4.2対応・完全コピペ版）
+# censor.py（胸も確実に検出＆強めモザイク対応）
 import os
 import cv2
 import numpy as np
 from PIL import Image
 
-# NudeNet は初回にモデルをDLします（GitHub Actionsでも可）
 try:
-    from nudenet import NudeDetector  # v3系
+    from nudenet import NudeDetector
     _NUDE_AVAILABLE = True
 except Exception:
     _NUDE_AVAILABLE = False
 
-# ===== 環境変数で調整可能 =====
 MOSAIC_ENABLED = os.getenv("MOSAIC_ENABLED", "true").lower() == "true"
-MOSAIC_BLOCK = max(8, int(os.getenv("MOSAIC_BLOCK", "24")))  # 粗さ（大きいほど荒い）
-SCORE_TH = float(os.getenv("MOSAIC_SCORE_TH", "0.45"))       # 検出しきい値
+MOSAIC_BLOCK = max(8, int(os.getenv("MOSAIC_BLOCK", "36")))  # ← デフォルト強めに変更
+SCORE_TH = float(os.getenv("MOSAIC_SCORE_TH", "0.45"))
 
 _DEFAULT_LABELS = [
     "EXPOSED_ANUS",
-    "EXPOSED_BREAST_F",
-    "EXPOSED_BREAST_M",
+    "EXPOSED_BREAST_F",   # 女性胸
+    "EXPOSED_BREAST_M",   # 男性胸
     "EXPOSED_GENITALIA_F",
     "EXPOSED_GENITALIA_M",
     "EXPOSED_BUTTOCKS",
 ]
+
 LABELS = {
     s.strip().upper()
     for s in os.getenv("SENSITIVE_LABELS", ",".join(_DEFAULT_LABELS)).split(",")
@@ -33,14 +32,13 @@ LABELS = {
 _detector = None
 
 def _get_detector():
-    """NudeNet Detectorを遅延初期化。失敗時は None を返す。"""
     global _detector
     if _detector is not None:
         return _detector
     if not _NUDE_AVAILABLE:
         return None
     try:
-        _detector = NudeDetector()  # モデルを自動DL
+        _detector = NudeDetector()
         return _detector
     except Exception:
         return None
@@ -62,23 +60,16 @@ def _pixelate_region(img, x1, y1, x2, y2, block=MOSAIC_BLOCK):
     return img
 
 def censor_image(in_path: str, out_path: str) -> bool:
-    """
-    画像 in_path の“秘部のみ”モザイクして out_path に保存。
-    True: モザイク適用あり / False: 検出無し or 機能無効
-    """
     if not MOSAIC_ENABLED:
         return False
 
     det = _get_detector()
     if det is None:
-        # モデルが使えない場合は素通し（投稿自体は継続）
         return False
 
-    # PILで開いて numpy(BGR) へ
     pil = Image.open(in_path).convert("RGB")
     img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
-    # 検出（NudeNetはファイルパスを渡すのが速い）
     try:
         results = det.detect(in_path)
     except Exception:
@@ -91,8 +82,8 @@ def censor_image(in_path: str, out_path: str) -> bool:
         box = r.get("box", [0, 0, 0, 0])
         if not (isinstance(box, (list, tuple)) and len(box) == 4):
             continue
-        x1, y1, x2, y2 = box
         if label in LABELS and score >= SCORE_TH:
+            x1, y1, x2, y2 = box
             img = _pixelate_region(img, x1, y1, x2, y2, MOSAIC_BLOCK)
             hit = True
 
